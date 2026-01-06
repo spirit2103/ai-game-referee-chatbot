@@ -1,102 +1,97 @@
 import os
-import time
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from game_logic import game
+from google.genai.errors import ClientError
+from game_state import game_state
 
-# 1. Setup
+# -------------------- Setup --------------------
 load_dotenv()
-api_key = os.getenv("GOOGLE_API_KEY")
-if not api_key:
-    print("Error: GOOGLE_API_KEY not found in .env")
-    exit(1)
 
-client = genai.Client(api_key=api_key)
+client = genai.Client(
+    api_key=os.getenv("GOOGLE_API_KEY")
+)
 
-# Define tools
-tools_list = [game.validate, game.resolve, game.update]
+# -------------------- Tool functions --------------------
+def validate_move(move: str) -> dict:
+    valid, result = game_state.validate_move(move)
+    return {"valid": valid, "result": result}
 
+def resolve_round(user_move: str) -> dict:
+    bot_move, winner = game_state.resolve_round(user_move)
+    return {"bot_move": bot_move, "winner": winner}
+
+def update_game_state(winner: str, user_move: str) -> dict:
+    return game_state.update_state(winner, user_move)
+
+tools = [validate_move, resolve_round, update_game_state]
+
+# -------------------- Game Loop --------------------
 def run_game():
-    print("\n--- AI Referee Initialized ---")
-    print("(Type 'quit' to exit)\n")
 
-    print("Referee: Welcome! I will judge the match between You and the Bot.")
-    print("Referee: Best of 3. Rock, Paper, Scissors, or Bomb (once).")
+    # Rules first (clean & short)
+    print("\n AI Game Referee — Rock–Paper–Scissors–Bomb\n")
+    print("Rules:")
+    print("1. Best of 3 rounds.")
+    print("2. Moves: rock, paper, scissors, bomb.")
+    print("3. Bomb can be used only once.")
+    print("4. Bomb beats all moves.")
+    print("5. Invalid input wastes the round.\n")
 
-    while not game.game_over:
-        user_input = input("\nYou: ")
-        if user_input.lower() in ['quit', 'exit']: break
-        
-        # --- TRAFFIC CONTROL ---
-        # Pauses to keep you safe from rate limits
-        print("Referee is judging...", end="\r") 
-        time.sleep(4) 
-        
-        # 2. Inject Context (Stateless Mode)
-        current_state = f"""
-        MATCH STATUS:
-        - Current Round: {game.rounds_played + 1} of 3
-        - Score: User {game.user_score} - Bot {game.bot_score}
-        - Bomb Used: User={game.user_bomb_used}, Bot={game.bot_bomb_used}
-        """
+    while game_state.round < game_state.max_rounds:
+        user_input = input("You: ")
 
-        # 3. Strict Referee Persona
-        sys_instruct = f"""
-        You are the NEUTRAL REFEREE for a game of Rock-Paper-Scissors-Plus.
-        There are two players: the USER (human) and the BOT (computer).
-        
-        {current_state}
-        
-        YOUR JOB:
-        1. Receive the User's move.
-        2. CALL `validate` first. 
-        3. CALL `resolve` to find out what the BOT played and who won.
-        4. CALL `update` to record the score.
-        5. ANNOUNCE the result. 
-           - Say "The Bot played [move]". Do NOT say "I played".
-           - Announce the winner clearly.
-        """
+        system_prompt = f"""
+You are a neutral referee for Rock–Paper–Scissors–Bomb.
 
-        # 4. Create fresh chat
-        chat = client.chats.create(
-            model="gemini-2.0-flash",
-            config=types.GenerateContentConfig(
-                system_instruction=sys_instruct,
-                tools=tools_list,
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                    disable=False
+Current state:
+- Round: {game_state.round + 1} / 3
+- Score: User {game_state.user_score}, Bot {game_state.bot_score}
+- User bomb used: {game_state.user_bomb_used}
+- Bot bomb used: {game_state.bot_bomb_used}
+
+Steps:
+1. Validate move
+2. Resolve round
+3. Update state
+4. Clearly announce result
+"""
+
+        try:
+            response = client.models.generate_content(
+                model="models/gemini-flash-latest",
+                contents=user_input,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    tools=tools,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                        disable=False
+                    )
                 )
             )
-        )
-        
-        try:
-            # 5. Send Message
-            response = chat.send_message(user_input)
-            
-            # Clear the loading text
-            print(" " * 30, end="\r") 
-            print(f"Referee: {response.text}")
 
-        except Exception as e:
-            # Silent Error Handling
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                print("Referee: (Connection glitch... re-judging...)")
-                time.sleep(10)
-                try:
-                    response = chat.send_message(user_input)
-                    print(f"Referee: {response.text}")
-                except:
-                    print("Referee: System busy. Please state your move again.")
+            print("\nReferee:", response.text)
+
+        except ClientError as e:
+            if e.code == 429:
+                print(
+                    "\nReferee: The game cannot continue due to rate limits. "
+                    "Please try again later.\n"
+                )
+                break
             else:
-                print(f"Error: {e}")
+                raise
 
-    # Final Score
-    print("\n--- FINAL RESULTS ---")
-    print(f"User: {game.user_score} - Bot: {game.bot_score}")
-    if game.user_score > game.bot_score: print("Winner: USER")
-    elif game.bot_score > game.user_score: print("Winner: BOT")
-    else: print("Result: DRAW")
+    # Final result
+    print("\n--- FINAL RESULT ---")
+    print(f"User: {game_state.user_score} | Bot: {game_state.bot_score}")
+
+    if game_state.user_score > game_state.bot_score:
+        print("Winner: USER ")
+    elif game_state.bot_score > game_state.user_score:
+        print("Winner: BOT ")
+    else:
+        print("Result: DRAW")
 
 if __name__ == "__main__":
     run_game()
